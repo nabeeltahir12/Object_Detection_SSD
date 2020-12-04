@@ -11,8 +11,6 @@ import gi
 import cv2
 gi.require_version('Gst', '1.0')
 
-from imutils.video import FPS
-from imutils.video import VideoStream
 
 vehicle_list = []		# vehicle bounding box metadata buffer
 
@@ -46,10 +44,39 @@ def IOU(x11, y11, x21, y21, x12, y12, x22, y22):		# intersection over union of t
     return iou
 
 
-width = 0
-height = 0
+def check_overlap(x11, y11, x21, y21, x12, y12, x22, y22):		# is there an overlap?
+    if (y12 > y21) or (y11 > y22):
+        return False
+    if (x12 > x21) or (x11 > x22):
+        return False
+    else:
+        return True
 
-start_time = time.time()
+
+# Constructing Argument Parse to input from Command Line
+ap = argparse.ArgumentParser()
+ap.add_argument("-p", "--prototxt", required=True, help='Path to prototxt')
+ap.add_argument("-m", "--model", required=True, help='Path to model weights')
+ap.add_argument("-c", "--confidence", type=float, default=0.7)
+args = vars(ap.parse_args())
+
+# Initialize Objects and corresponding colors which the model can detect
+labels = ["background", "aeroplane", "bicycle", "bird",
+          "boat", "bottle", "bus", "car", "cat", "chair", "cow",
+          "diningtable", "dog", "horse", "motorbike", "person", "pottedplant",
+          "sheep", "sofa", "train", "tvmonitor"]
+colors = np.random.uniform(0, 255, size=(len(labels), 3))
+
+# Loading Caffe Model
+print('[Status] Loading Model...')
+nn = cv2.dnn.readNetFromCaffe(args['prototxt'], args['model'])
+
+time.sleep(2.0)
+fps = FPS().start()
+frame_number = 0
+tracking_id = 0
+y1 = 178
+y2 = 477
 
 
 def bus_call(bus, message, loop):
@@ -168,14 +195,144 @@ frame_number = 0
 stop = 0
 
 while True:
-    message = bus.timed_pop_filtered(10000, Gst.MessageType.ANY)
-    if image_arr is not None:
+    if stop == 1:
+        # ~ sys.exit()
+        break
+    message = bus.timed_pop_filtered(
+        10000, Gst.MessageType.ANY)
+    if image_arr is not None:  # where the magic happens
         if stop:
             sys.exit()
 
-        cv2.imshow("car_detection", image_arr)
+        frame = image_arr
 
-        # ~ frame_number += 1
+        if type(frame) == type(None):
+            break
+
+        frame = imutils.resize(frame, width=1280)
+        (h, w) = frame.shape[:2]
+        # ~ print(h, w)
+
+        cv2.line(frame, (0, int(0.2 * h)),
+                 (w, int(0.2 * h)), (0, 255, 0), thickness=2)
+
+        # Converting Frame to Blob
+        blob = cv2.dnn.blobFromImage(cv2.resize(
+            frame, (300, 300)), 0.007843, (300, 300), 127.5)
+
+        # Passing Blob through network to detect and predict
+        nn.setInput(blob)
+        detections = nn.forward()
+
+        # Loop over the detections
+        for i in np.arange(0, detections.shape[2]):
+
+            # Extracting the confidence of predictions
+            confidence = detections[0, 0, i, 2]
+
+            # Filtering out weak predictions
+            if confidence > args["confidence"]:
+
+                # Extracting the index of the labels from the detection
+                # Computing the (x,y) - coordinates of the bounding box
+                idx = int(detections[0, 0, i, 1])
+
+                if idx == 7:
+
+                    # Extracting bounding box coordinates
+                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                    (startX, startY, endX, endY) = box.astype("int")
+
+                    if startY >= (0.2 * h):		# neglecting boxes too far from the camera
+
+                        if not vehicle_list:
+                            temp_frames_list = []
+                            temp_frames_list.append(frame_number)
+                            temp_x1_list = []
+                            temp_x1_list.append(startX)
+                            temp_y1_list = []
+                            temp_y1_list.append(startY)
+                            temp_x2_list = []
+                            temp_x2_list.append(endX)
+                            temp_y2_list = []
+                            temp_y2_list.append(endY)
+                            vehicle_list.append(Vehicle(tracking_id, temp_frames_list,
+                                                        temp_x1_list, temp_y1_list, temp_x2_list, temp_y2_list))
+                            temp_track = 'id: ' + str(tracking_id)
+                            tracking_id += 1
+
+                        else:
+                            iou_list = []
+                            for v in vehicle_list:
+                                frame_difference = frame_number - \
+                                    v.frames_list[-1]
+                                # ~ print('overlap? ', check_overlap(
+                                # ~ v.x1_list[-1], v.y1_list[-1], v.x2_list[-1], v.y2_list[-1], startX, startY, endX, endY))
+                                if check_overlap(v.x1_list[-1], v.y1_list[-1], v.x2_list[-1], v.y2_list[-1], startX, startY, endX, endY) and frame_difference < 5:
+                                    intersection_over_union = IOU(
+                                        v.x1_list[-1], v.y1_list[-1], v.x2_list[-1], v.y2_list[-1], startX, startY, endX, endY)
+                                    # ~ print(
+                                    # ~ 'operands: ', v.x1_list[-1], v.y1_list[-1], v.x2_list[-1], v.y2_list[-1], startX, startY, endX, endY)
+                                    iou_list.append(intersection_over_union)
+                                    # ~ print(intersection_over_union)
+                                else:
+                                    # ~ print(v.x1_list[-1], v.y1_list[-1], v.x2_list[-1],
+                                    # ~ v.y2_list[-1], ' does not overlap with any bounding box')
+                                    iou_list.append(0)
+
+                            if not all([v == 0 for v in iou_list]):
+                                max_value = max(iou_list)
+                                max_index = iou_list.index(max_value)
+                                # ~ print('iou list: ', iou_list)
+                                # ~ print('frame number: ', frame_number, ' max iou: ', max_value, ' b_old: (', vehicle_list[max_index].x1_list[-1], ',', vehicle_list[
+                                # ~ max_index].y1_list[-1], ',', vehicle_list[max_index].x2_list[-1], ',', vehicle_list[max_index].y2_list[-1], ') b: ', (startX, startY, endX, endY))
+                                vehicle_list[max_index].frames_list.append(
+                                    frame_number)
+                                vehicle_list[max_index].x1_list.append(startX)
+                                vehicle_list[max_index].y1_list.append(startY)
+                                vehicle_list[max_index].x2_list.append(endX)
+                                vehicle_list[max_index].y2_list.append(endY)
+                                temp_track = 'id: ' + \
+                                    str(vehicle_list[max_index].vehicle_id)
+                            else:
+                                temp_frames_list = []
+                                temp_frames_list.append(frame_number)
+                                temp_x1_list = []
+                                temp_x1_list.append(startX)
+                                temp_y1_list = []
+                                temp_y1_list.append(startY)
+                                temp_x2_list = []
+                                temp_x2_list.append(endX)
+                                temp_y2_list = []
+                                temp_y2_list.append(endY)
+                                vehicle_list.append(Vehicle(
+                                    tracking_id, temp_frames_list, temp_x1_list, temp_y1_list, temp_x2_list, temp_y2_list))
+                                temp_track = 'id: ' + str(tracking_id)
+                                tracking_id += 1
+
+                        cv2.rectangle(frame, (startX, startY),
+                                      (endX, endY), colors[idx], 2)
+
+                        y = startY - 15 if startY - 15 > 15 else startY + 15
+                        label = "{} {}: {:.2f}%: {} {} {} {}".format(
+                            temp_track, labels[idx], confidence * 100, startX, startY, endX, endY)
+                        cv2.putText(frame, label, (startX, y),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors[idx], 2)
+
+        cv2.imshow("frame", frame)
+
+        # ~ cv2.imwrite("/home/ee/Caffe-SSD-Object-Detection/Object Detection Caffe/stream/frame_number=" +
+        # ~ str(frame_number)+".jpg", frame)
+        frame_number += 1
+
+        # discard false detections (without sufficient number of frames)
+        for i, x in enumerate(vehicle_list):
+            frame_lag = frame_number - x.frames_list[-1]
+            l = len(x.frames_list)
+            if (frame_lag > 50 and l < 9):
+                print('vehicle '+str(vehicle_list[i].vehicle_id)+' deleted')
+                del vehicle_list[i]
+                break
 
         key = cv2.waitKey(1) & 0xFF
 
@@ -183,24 +340,82 @@ while True:
             print("[Status] Video Stream Manually Terminated")
             break
 
-    if message:
-        if message.type == Gst.MessageType.ERROR:
-            err, debug = message.parse_error()
-            print(("Error received from element %s: %s" %
-                   (message.src.get_name(), err)))
-            print(("Debugging information: %s" % debug))
-            break
-        elif message.type == Gst.MessageType.EOS:
-            stop = 1
-            print("End-Of-Stream reached.")
-            # ~ sys.exit()
-            break
-        elif message.type.STATE_CHANGED:
-            if isinstance(message.src, Gst.Pipeline):
-                old_state, new_state, pending_state = message.parse_state_changed()
-                print(("Pipeline state changed from %s to %s." %
-                       (old_state.value_nick, new_state.value_nick)))
-        else:
-            print("Unexpected message received.")
+        fps.update()
+
+        fps.stop()
+
+        if message:
+            if message.type == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                print(("Error received from element %s: %s" %
+                       (message.src.get_name(), err)))
+                print(("Debugging information: %s" % debug))
+                break
+            elif message.type == Gst.MessageType.EOS:
+                stop = 1
+                print("End-Of-Stream reached.")
+                fps.stop()
+                cv2.destroyAllWindows()
+                # ~ print("[Info] Elapsed time: {:.2f}".format(fps.elapsed()))
+                # ~ print("[Info] Approximate FPS:  {:.2f}".format(fps.fps()))
+                # ~ print("[Info] Total frames: ", frame_number)
+                # ~ sys.exit()
+                break
+            elif message.type.STATE_CHANGED:
+                if isinstance(message.src, Gst.Pipeline):
+                    old_state, new_state, pending_state = message.parse_state_changed()
+                    print(("Pipeline state changed from %s to %s." %
+                           (old_state.value_nick, new_state.value_nick)))
+            else:
+                print("Unexpected message received.")
+
+
+# ~ fps.stop()
+
+print("[Info] Elapsed time: {:.2f}".format(fps.elapsed()))
+print("[Info] Approximate FPS:  {:.2f}".format(fps.fps()))
+print("[Info] Total frames: ", frame_number)
+
+# ~ cv2.destroyAllWindows()
+
+# vehicle_count = 0
+# for v in vehicle_list:
+#     if v.frames_list[-1] < (frame_number - 50):
+#         vehicle_count += 1
+#         print('\n vehicle id: ', v.vehicle_id)
+#         for i, l in enumerate(v.frames_list):
+#             print('frame:', v.frames_list[i], 'x1:', v.x1_list[i], 'y1:',
+#                   v.y1_list[i], 'x2:', v.x2_list[i], 'y2:', v.y2_list[i])
+# print(str(vehicle_count)+' vehicles detected')
+
+# ~ if message:
+# ~ if message.type == Gst.MessageType.ERROR:
+# ~ err, debug = message.parse_error()
+# ~ print(("Error received from element %s: %s" %
+# ~ (message.src.get_name(), err)))
+# ~ print(("Debugging information: %s" % debug))
+# ~ break
+# ~ elif message.type == Gst.MessageType.EOS:
+# ~ stop = 1
+# ~ print("End-Of-Stream reached.")
+
+# ~ vehicle_count = 0
+# ~ for v in vehicle_list:
+# ~ if v.frames_list[-1] < (frame_number - 50):
+# ~ vehicle_count += 1
+# ~ print('\n vehicle id: ', v.vehicle_id)
+# ~ for i, l in enumerate(v.frames_list):
+# ~ print('frame:', v.frames_list[i], 'x1:', v.x1_list[i], 'y1:',
+# ~ v.y1_list[i], 'x2:', v.x2_list[i], 'y2:', v.y2_list[i])
+# ~ print(str(vehicle_count)+' vehicles detected')
+# ~ sys.exit()
+# ~ break
+# ~ elif message.type.STATE_CHANGED:
+# ~ if isinstance(message.src, Gst.Pipeline):
+# ~ old_state, new_state, pending_state = message.parse_state_changed()
+# ~ print(("Pipeline state changed from %s to %s." %
+# ~ (old_state.value_nick, new_state.value_nick)))
+# ~ else:
+# ~ print("Unexpected message received.")
 
 pipeline.set_state(Gst.State.NULL)
