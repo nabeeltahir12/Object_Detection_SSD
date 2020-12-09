@@ -1,3 +1,5 @@
+import gi
+gi.require_version('Gst', '1.0')
 from imutils.video import VideoStream
 from imutils.video import FPS
 import numpy as np
@@ -7,15 +9,11 @@ import time
 from gi.repository import GObject, Gst, GLib
 import sys
 import numpy
-import gi
 import cv2
-gi.require_version('Gst', '1.0')
-
 
 vehicle_list = []		# vehicle bounding box metadata buffer
 
 # Vehicle Class ##########     # vehicle_list[] object class; described by the vehicle's tracking id, the number of frames it is tracked for and the coordinates of its bounding boxes
-
 
 class Vehicle:
     def __init__(self, vehicle_id, frames_list=[], x1_list=[], y1_list=[], x2_list=[], y2_list=[]):
@@ -27,7 +25,6 @@ class Vehicle:
         self.y2_list = y2_list
 
 ########## Vehicle Class ##########
-
 
 def IOU(x11, y11, x21, y21, x12, y12, x22, y22):		# intersection over union of two bounding boxes
     b1 = (x11, y11, x21, y21)
@@ -43,7 +40,6 @@ def IOU(x11, y11, x21, y21, x12, y12, x22, y22):		# intersection over union of t
     iou = area_b1b2 / (area_b1+area_b2-area_b1b2)
     return iou
 
-
 def check_overlap(x11, y11, x21, y21, x12, y12, x22, y22):		# is there an overlap?
     if (y12 > y21) or (y11 > y22):
         return False
@@ -51,7 +47,6 @@ def check_overlap(x11, y11, x21, y21, x12, y12, x22, y22):		# is there an overla
         return False
     else:
         return True
-
 
 # Constructing Argument Parse to input from Command Line
 ap = argparse.ArgumentParser()
@@ -78,11 +73,28 @@ tracking_id = 0
 y1 = 178
 y2 = 477
 
+global stop
+stop = 0
 
 def bus_call(bus, message, loop):
     t = message.type
     if t == Gst.MessageType.EOS:
         sys.stdout.write("End of stream\n")
+        print("[Info] Elapsed time: {:.2f}".format(fps.elapsed()))
+        print("[Info] FPS:  {:.2f}".format(fps.fps()))
+        print("[Info] Total frames: ", frame_number)
+        
+        vehicle_count = 0
+        for v in vehicle_list:
+            if v.frames_list[-1] < (frame_number - 50):
+                vehicle_count += 1
+                print('\n vehicle id: ', v.vehicle_id)
+                for i, l in enumerate(v.frames_list):
+                    print('frame:', v.frames_list[i], 'x1:', v.x1_list[i], 'y1:',
+                          v.y1_list[i], 'x2:', v.x2_list[i], 'y2:', v.y2_list[i])
+        print(str(vehicle_count)+' vehicles detected')
+            
+        quit()
         loop.quit()
     elif t == Gst.MessageType.WARNING:
         err, debug = message.parse_warning()
@@ -92,7 +104,6 @@ def bus_call(bus, message, loop):
         sys.stderr.write("Error: %s: %s\n" % (err, debug))
         loop.quit()
     return True
-
 
 def gst_to_opencv(sample):
     buf = sample.get_buffer()
@@ -106,7 +117,6 @@ def gst_to_opencv(sample):
     arr = numpy.ndarray((caps.get_structure(0).get_value('height'), caps.get_structure(
         0).get_value('width'), 3), buffer=buf.extract_dup(0, buf.get_size()), dtype=numpy.uint8)
     return arr
-
 
 def new_buffer(sink, data):
     global image_arr
@@ -188,21 +198,10 @@ pipeline.set_state(Gst.State.PLAYING)
 
 frame_number = 0
 
-# ~ width = 1280
-# ~ height = 720
-# ~ dim = (width, height)
-
-stop = 0
-
 while True:
-    if stop == 1:
-        # ~ sys.exit()
-        break
     message = bus.timed_pop_filtered(
         10000, Gst.MessageType.ANY)
     if image_arr is not None:  # where the magic happens
-        if stop:
-            sys.exit()
 
         frame = image_arr
 
@@ -210,8 +209,9 @@ while True:
             break
 
         frame = imutils.resize(frame, width=1280)
+        # frame = imutils.resize(frame, width=1920)
         (h, w) = frame.shape[:2]
-        # ~ print(h, w)
+        # print(h, w)
 
         cv2.line(frame, (0, int(0.2 * h)),
                  (w, int(0.2 * h)), (0, 255, 0), thickness=2)
@@ -321,10 +321,14 @@ while True:
 
         cv2.imshow("frame", frame)
 
-        # ~ cv2.imwrite("/home/ee/Caffe-SSD-Object-Detection/Object Detection Caffe/stream/frame_number=" +
-        # ~ str(frame_number)+".jpg", frame)
+        cv2.imwrite("/home/ee/Caffe-SSD-Object-Detection/Object Detection Caffe/stream/frame_number=" +
+        str(frame_number)+".jpg", frame)
+        
         frame_number += 1
 
+        if stop == 1:
+            break
+        
         # discard false detections (without sufficient number of frames)
         for i, x in enumerate(vehicle_list):
             frame_lag = frame_number - x.frames_list[-1]
@@ -343,7 +347,7 @@ while True:
         fps.update()
 
         fps.stop()
-
+    
         if message:
             if message.type == Gst.MessageType.ERROR:
                 err, debug = message.parse_error()
@@ -356,10 +360,6 @@ while True:
                 print("End-Of-Stream reached.")
                 fps.stop()
                 cv2.destroyAllWindows()
-                # ~ print("[Info] Elapsed time: {:.2f}".format(fps.elapsed()))
-                # ~ print("[Info] Approximate FPS:  {:.2f}".format(fps.fps()))
-                # ~ print("[Info] Total frames: ", frame_number)
-                # ~ sys.exit()
                 break
             elif message.type.STATE_CHANGED:
                 if isinstance(message.src, Gst.Pipeline):
@@ -369,53 +369,24 @@ while True:
             else:
                 print("Unexpected message received.")
 
+    if stop == 1:
+        break
 
-# ~ fps.stop()
+fps.stop()
+cv2.destroyAllWindows()
 
 print("[Info] Elapsed time: {:.2f}".format(fps.elapsed()))
-print("[Info] Approximate FPS:  {:.2f}".format(fps.fps()))
+print("[Info] FPS:  {:.2f}".format(fps.fps()))
 print("[Info] Total frames: ", frame_number)
 
-# ~ cv2.destroyAllWindows()
-
-# vehicle_count = 0
-# for v in vehicle_list:
-#     if v.frames_list[-1] < (frame_number - 50):
-#         vehicle_count += 1
-#         print('\n vehicle id: ', v.vehicle_id)
-#         for i, l in enumerate(v.frames_list):
-#             print('frame:', v.frames_list[i], 'x1:', v.x1_list[i], 'y1:',
-#                   v.y1_list[i], 'x2:', v.x2_list[i], 'y2:', v.y2_list[i])
-# print(str(vehicle_count)+' vehicles detected')
-
-# ~ if message:
-# ~ if message.type == Gst.MessageType.ERROR:
-# ~ err, debug = message.parse_error()
-# ~ print(("Error received from element %s: %s" %
-# ~ (message.src.get_name(), err)))
-# ~ print(("Debugging information: %s" % debug))
-# ~ break
-# ~ elif message.type == Gst.MessageType.EOS:
-# ~ stop = 1
-# ~ print("End-Of-Stream reached.")
-
-# ~ vehicle_count = 0
-# ~ for v in vehicle_list:
-# ~ if v.frames_list[-1] < (frame_number - 50):
-# ~ vehicle_count += 1
-# ~ print('\n vehicle id: ', v.vehicle_id)
-# ~ for i, l in enumerate(v.frames_list):
-# ~ print('frame:', v.frames_list[i], 'x1:', v.x1_list[i], 'y1:',
-# ~ v.y1_list[i], 'x2:', v.x2_list[i], 'y2:', v.y2_list[i])
-# ~ print(str(vehicle_count)+' vehicles detected')
-# ~ sys.exit()
-# ~ break
-# ~ elif message.type.STATE_CHANGED:
-# ~ if isinstance(message.src, Gst.Pipeline):
-# ~ old_state, new_state, pending_state = message.parse_state_changed()
-# ~ print(("Pipeline state changed from %s to %s." %
-# ~ (old_state.value_nick, new_state.value_nick)))
-# ~ else:
-# ~ print("Unexpected message received.")
+vehicle_count = 0
+for v in vehicle_list:
+    if v.frames_list[-1] < (frame_number - 50):
+        vehicle_count += 1
+        print('\n vehicle id: ', v.vehicle_id, ' total frames = ', len(v.frames_list))
+        for i, l in enumerate(v.frames_list):
+            print('frame:', v.frames_list[i], 'x1:', v.x1_list[i], 'y1:',
+                  v.y1_list[i], 'x2:', v.x2_list[i], 'y2:', v.y2_list[i])
+print(str(vehicle_count)+' vehicles detected')
 
 pipeline.set_state(Gst.State.NULL)
